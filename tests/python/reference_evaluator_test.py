@@ -7103,6 +7103,87 @@ class TestReferenceEvaluator:
         return expanded
 
     @pytest.mark.parametrize(
+        "nearest_mode", ["round_prefer_floor", "round_prefer_ceil", "floor", "ceil"]
+    )
+    @pytest.mark.parametrize("use_sizes", [False, True])
+    @pytest.mark.parametrize("scale", [1, 2])
+    @pytest.mark.parametrize("axes", [None, [0]])
+    def test_resize_nearest_preserves_uint64(
+        self, nearest_mode, use_sizes, scale, axes
+    ):
+        data = np.array([2**53 + 1, 2**53 + 3, 2**63 + 1, 2**64 - 1], dtype=np.uint64)
+        if use_sizes:
+            kwargs = {"sizes": np.array([len(data) * scale], dtype=np.int64)}
+        else:
+            kwargs = {"scales": np.array([scale], dtype=np.float32)}
+        actual = self._run_resize(
+            data,
+            axes=axes,
+            mode="nearest",
+            nearest_mode=nearest_mode,
+            coordinate_transformation_mode="asymmetric",
+            **kwargs,
+        )
+        if scale == 1:
+            expected = data
+        elif nearest_mode in ("round_prefer_floor", "floor"):
+            expected = data[[0, 0, 1, 1, 2, 2, 3, 3]]
+        else:
+            expected = data[[0, 1, 1, 2, 2, 3, 3, 3]]
+        assert actual.dtype == data.dtype
+        assert_array_equal(actual, expected)
+
+    @pytest.mark.parametrize("chunk_budget", [1, 4 * 1024 * 1024])
+    @pytest.mark.parametrize("contiguous", [False, True])
+    @pytest.mark.parametrize("use_sizes", [False, True])
+    def test_resize_nearest_preserves_uint64_partial_axes(
+        self, monkeypatch, chunk_budget, contiguous, use_sizes
+    ):
+        monkeypatch.setattr(
+            "onnx.reference.ops.op_resize._AXES_INTERPOLATION_MEMORY_BUDGET",
+            chunk_budget,
+        )
+        data = (np.arange(120, dtype=np.uint64) + 2**53 + 1).reshape(2, 3, 4, 5)
+        if not contiguous:
+            data = data[..., ::-1]
+        kwargs = (
+            {"sizes": np.array([10, 6], dtype=np.int64)}
+            if use_sizes
+            else {"scales": np.array([2, 2], dtype=np.float32)}
+        )
+        actual = self._run_resize(data, axes=[-1, 1], mode="nearest", **kwargs)
+        expected = np.repeat(np.repeat(data, 2, axis=-1), 2, axis=1)
+        assert actual.dtype == data.dtype
+        assert_array_equal(actual, expected)
+
+    def test_resize_nearest_preserves_uint64_with_extrapolation(self):
+        data = np.array([2**53 + 1, 2**53 + 3], dtype=np.uint64)
+        actual = self._run_resize(
+            data,
+            roi=np.array([-0.5, 1.5], dtype=np.float32),
+            sizes=np.array([5], dtype=np.int64),
+            mode="nearest",
+            coordinate_transformation_mode="tf_crop_and_resize",
+            extrapolation_value=7.25,
+        )
+        expected = np.array([7, data[0], data[0], data[1], 7], dtype=np.uint64)
+        assert actual.dtype == data.dtype
+        assert_array_equal(actual, expected)
+
+    def test_resize_nearest_preserves_uint64_with_excluded_neighbors(self):
+        data = np.array([2**53 + 1, 2**53 + 3], dtype=np.uint64)
+        actual = self._run_resize(
+            data,
+            scales=np.array([2], dtype=np.float32),
+            mode="nearest",
+            nearest_mode="floor",
+            exclude_outside=1,
+        )
+        expected = np.array([0, data[0], data[0], data[1]], dtype=np.uint64)
+        assert actual.dtype == data.dtype
+        assert_array_equal(actual, expected)
+
+    @pytest.mark.parametrize(
         ("mode", "attributes"),
         [
             ("nearest", {"nearest_mode": "round_prefer_ceil"}),

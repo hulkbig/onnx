@@ -377,6 +377,7 @@ def _interpolate_1d_along_axis(
     extrapolation_value: float = 0.0,
     coordinate_transformation_mode: str = "half_pixel",
     exclude_outside: bool = False,
+    nearest: bool = False,
 ) -> np.ndarray:
     """Vectorized 1-D resize along a single axis.
 
@@ -454,16 +455,32 @@ def _interpolate_1d_along_axis(
     # Edge-padding is equivalent to clamping indices into the valid range.
     # intp cast: np.take rejects int64 indices on 32-bit platforms.
     clamped = np.clip(neighbor_idxes, 0, input_width - 1).astype(np.intp)
-    gathered = np.take(data, clamped, axis=axis)
-
-    coeff_shape = (1,) * axis + coeffs.shape + (1,) * (data.ndim - axis - 1)
-    weighted = gathered * coeffs.reshape(coeff_shape)
-    result = weighted.sum(axis=axis + 1)
+    if nearest:
+        # Select the original value without a floating-point multiply and sum.
+        # In particular, uint64 values above 2**53 cannot round-trip through float64.
+        selected = clamped[np.arange(output_width_int), np.argmax(coeffs, axis=1)]
+        result = np.take(data, selected, axis=axis)
+        if exclude_outside:
+            mask_shape = (
+                (1,) * axis + (output_width_int,) + (1,) * (data.ndim - axis - 1)
+            )
+            valid = coeffs.any(axis=1).reshape(mask_shape)
+            result = np.where(valid, result, np.zeros((), dtype=data.dtype))
+    else:
+        gathered = np.take(data, clamped, axis=axis)
+        coeff_shape = (1,) * axis + coeffs.shape + (1,) * (data.ndim - axis - 1)
+        weighted = gathered * coeffs.reshape(coeff_shape)
+        result = weighted.sum(axis=axis + 1)
 
     if is_extrapolated is not None and is_extrapolated.any():
         mask_shape = (1,) * axis + (output_width_int,) + (1,) * (data.ndim - axis - 1)
         mask = is_extrapolated.reshape(mask_shape)
-        result = np.where(mask, extrapolation_value, result)
+        fill_value = (
+            onnx.numpy_helper.saturate_cast(np.asarray(extrapolation_value), data.dtype)
+            if nearest
+            else extrapolation_value
+        )
+        result = np.where(mask, fill_value, result)
 
     return result  # type: ignore[no-any-return]
 
@@ -477,6 +494,7 @@ def _interpolate_nd(
     roi: np.ndarray | None = None,
     keep_aspect_ratio_policy: str | None = "stretch",
     exclude_outside: bool = False,
+    nearest: bool = False,
     **kwargs: Any,
 ) -> np.ndarray:
     if output_size is None and scale_factors is None:
@@ -547,7 +565,7 @@ def _interpolate_nd(
     # Separable interpolation: resize one axis at a time. This avoids the
     # O(prod(output_shape)) scan of the old implementation, which called the
     # recursive _interpolate_nd_with_x once per output element.
-    result = data if data.dtype == np.float64 else data.astype(np.float64)
+    result = data if nearest or data.dtype == np.float64 else data.astype(np.float64)
     for axis in axes:
         axis_scale = float(scale_factors[axis])
         axis_output = int(output_size[axis])
@@ -573,6 +591,7 @@ def _interpolate_nd(
             get_coeffs,
             roi=axis_roi,
             exclude_outside=exclude_outside,
+            nearest=nearest,
             **kwargs,
         )
     return result
@@ -699,6 +718,7 @@ class Resize(OpRun):
                     roi=roi,
                     keep_aspect_ratio_policy=keep_aspect_ratio_policy,
                     exclude_outside=exclude_outside,
+                    nearest=mode == "nearest",
                     coordinate_transformation_mode=coordinate_transformation_mode,
                     extrapolation_value=extrapolation_value,
                 ),
@@ -732,6 +752,7 @@ class Resize(OpRun):
                     roi=roi,
                     keep_aspect_ratio_policy=keep_aspect_ratio_policy,
                     exclude_outside=exclude_outside,
+                    nearest=mode == "nearest",
                     coordinate_transformation_mode=coordinate_transformation_mode,
                     extrapolation_value=extrapolation_value,
                 ),
@@ -773,6 +794,7 @@ class Resize(OpRun):
                         roi=roi,
                         keep_aspect_ratio_policy=keep_aspect_ratio_policy,
                         exclude_outside=exclude_outside,
+                        nearest=mode == "nearest",
                         coordinate_transformation_mode=coordinate_transformation_mode,
                         extrapolation_value=extrapolation_value,
                     ),
@@ -803,6 +825,7 @@ class Resize(OpRun):
                         roi=roi,
                         keep_aspect_ratio_policy=keep_aspect_ratio_policy,
                         exclude_outside=exclude_outside,
+                        nearest=mode == "nearest",
                         coordinate_transformation_mode=coordinate_transformation_mode,
                         extrapolation_value=extrapolation_value,
                     ),
