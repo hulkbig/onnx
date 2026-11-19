@@ -78,6 +78,36 @@ def _generate_test_data(
 
 class ImageDecoder(Base):
     @staticmethod
+    def export_image_decoder_decode_png_palette() -> None:
+        # A fixed 2x2 indexed PNG with three palette entries. Keeping the encoded
+        # bytes and expected colors explicit makes generation independent of Pillow.
+        data = np.frombuffer(
+            bytes.fromhex(
+                "89504e470d0a1a0a0000000d49484452000000020000000208030000004568fd16000000"
+                "09504c5445dc141e0ab428323ce6826f86800000000e49444154789c6360606460620000"
+                "000e0004c6887cf80000000049454e44ae426082"
+            ),
+            dtype=np.uint8,
+        )
+        rgb = np.array(
+            [[[220, 20, 30], [10, 180, 40]], [[50, 60, 230], [220, 20, 30]]],
+            dtype=np.uint8,
+        )
+        for pixel_format, output in (("RGB", rgb), ("BGR", rgb[:, :, ::-1])):
+            node = onnx.helper.make_node(
+                "ImageDecoder",
+                inputs=["data"],
+                outputs=["output"],
+                pixel_format=pixel_format,
+            )
+            expect(
+                node,
+                inputs=[data],
+                outputs=[output],
+                name=f"test_image_decoder_decode_png_palette_{pixel_format.lower()}",
+            )
+
+    @staticmethod
     def export_image_decoder_decode_jpeg_rgb() -> None:
         node = onnx.helper.make_node(
             "ImageDecoder",
